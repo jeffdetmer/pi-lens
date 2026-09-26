@@ -4632,13 +4632,20 @@ export function handleNotifyOpen(
 	);
 }
 
-/** #3543: resolves `true` only when the content went on the wire. */
+/**
+ * #3543: resolves `true` only when the content went on the wire.
+ *
+ * #3545: `saved` is a save this entry carries for a touch it replaced, or
+ * for an older saved read kept out behind it. The save happened, so it goes
+ * out for the bytes this run left the server holding, as the open path does.
+ */
 async function handleNotifyChangeOnce(
 	state: LSPClientState,
 	filePath: string,
 	content: string,
 	normalizedPath: string,
 	coalescedCount = 0,
+	saved = false,
 ): Promise<boolean> {
 	if (!isClientAlive(state)) return false;
 	const uri =
@@ -4668,7 +4675,12 @@ async function handleNotifyChangeOnce(
 		if (fallbackOpenSent)
 			recordSentContent(state, normalizedPath, 0, content, coalescedCount);
 		state.openDocuments.add(normalizedPath);
+		// #3549: a re-open, like the main didOpen's. Left set, the publish
+		// handler dropped every later answer for the path.
+		state.closedDocuments?.delete(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
+		if (saved && fallbackOpenSent)
+			await sendDidSave(state, normalizedPath, uri, content);
 		return fallbackOpenSent;
 	}
 
@@ -4689,6 +4701,8 @@ async function handleNotifyChangeOnce(
 	);
 	if (changeSent)
 		recordSentContent(state, normalizedPath, version, content, coalescedCount);
+	if (saved && changeSent)
+		await sendDidSave(state, normalizedPath, uri, content);
 	return changeSent;
 }
 
@@ -4706,16 +4720,19 @@ export function handleNotifyChange(
 	const normalizedPath = normalizeMapKey(filePath);
 	// #3405: no `saved` argument — `LSPService.updateFile` is this path's only
 	// entry point and no caller declares a save through it, so a change never
-	// originates one. A save intent inherited from a superseded open entry is
-	// dropped here by construction rather than sent after a bare didChange.
-	return enqueueDocumentNotify(state, normalizedPath, (coalescedCount) =>
-		handleNotifyChangeOnce(
-			state,
-			filePath,
-			content,
-			normalizedPath,
-			coalescedCount,
-		),
+	// originates one. #3545: it still sends the save its entry inherited.
+	return enqueueDocumentNotify(
+		state,
+		normalizedPath,
+		(coalescedCount, queuedSaved) =>
+			handleNotifyChangeOnce(
+				state,
+				filePath,
+				content,
+				normalizedPath,
+				coalescedCount,
+				queuedSaved,
+			),
 	);
 }
 

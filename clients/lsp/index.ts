@@ -2074,6 +2074,9 @@ export class LSPService {
 	private forgetReadiness(key: string): void {
 		this.state.demonstratedReady.delete(key);
 		this.state.demonstratedCold.delete(key);
+		// #3537: the consecutive-timeout streak is the retired client's too; a
+		// replacement that inherited it was demoted on its first timeout.
+		this.notifyWriteBackpressureStreak.delete(key);
 	}
 
 	private markDemonstratedReadyKey(key: string): void {
@@ -2104,6 +2107,10 @@ export class LSPService {
 		filePath: string,
 	): void {
 		if (!key) return;
+		// #3537: generation-checked like the retract and the demotion. A
+		// predecessor's timeout settling after its replacement registered is
+		// not a strike against the replacement.
+		if (this.state.clients.get(key) !== entry.client) return;
 		const streak = (this.notifyWriteBackpressureStreak.get(key) ?? 0) + 1;
 		if (streak < NOTIFY_BACKPRESSURE_BROKEN_AFTER) {
 			this.notifyWriteBackpressureStreak.set(key, streak);
@@ -4634,7 +4641,7 @@ export class LSPService {
 			options?.spawnBudgetMs,
 			async (spawned) => {
 				const languageId = getLanguageId(filePath) ?? "plaintext";
-				await spawned.client.notify.open(
+				const sent = await spawned.client.notify.open(
 					filePath,
 					content,
 					languageId,
@@ -4646,11 +4653,13 @@ export class LSPService {
 				// the drift backstop. The same full-coverage gate applies, so an
 				// auxiliary holding the document keeps the record unwritten rather
 				// than letting one client's push claim every view is current.
+				// #3564: and only for content that went on the wire (#3543), the
+				// same `!== false` reading touchFile gives the result.
 				this.recordFullyCoveredSync(
 					filePath,
 					content,
 					[spawned],
-					true,
+					sent !== false,
 					startedAt,
 				);
 			},

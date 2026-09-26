@@ -17,12 +17,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	closeDocument,
+	diagnosticsVersionForPath,
 	handleNotifyChange,
 	handleNotifyOpen,
 	type LSPClientState,
+	type LSPDiagnostic,
+	setupIncomingHandlers,
 } from "../../../clients/lsp/client.js";
 import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
@@ -37,6 +41,11 @@ import { createMockState } from "./mock-client-state.js";
 let tmpDir: string;
 let FILE: string;
 let KEY: string;
+const D: LSPDiagnostic = {
+	severity: 1,
+	message: "unused import",
+	range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+};
 
 /** Record each lifecycle message in wire order; hold the ones gated. */
 function recordWire(
@@ -210,6 +219,41 @@ describe("#3477 — closeDocument is ordered with the path's notify queue", () =
 
 		expect(order).toEqual(["didClose", "didOpen"]);
 		expect(state.openDocuments.has(KEY)).toBe(true);
+	});
+
+	// #3549: the change path's fallback didOpen re-opened the path without
+	// leaving `closedDocuments`, so the publish handler dropped every later
+	// answer for it as a teardown flush, on every server.
+	it("stores a publish after a change re-opens a closed path through its fallback didOpen", async () => {
+		const state = openState();
+		const order = recordWire(state);
+		setupIncomingHandlers(state, {});
+		type Publish = (params: {
+			uri: string;
+			version?: number;
+			diagnostics: LSPDiagnostic[];
+		}) => void;
+		const calls = vi.mocked(state.connection.onNotification).mock
+			.calls as unknown as Array<[string, Publish]>;
+		const publish = calls.find(
+			([method]) => method === "textDocument/publishDiagnostics",
+		)?.[1] as Publish;
+		await closeDocument(state, FILE);
+
+		await expect(handleNotifyChange(state, FILE, "v2")).resolves.toBe(true);
+		expect(order).toEqual(["didClose", "didOpen"]);
+
+		vi.useFakeTimers();
+		try {
+			const before = diagnosticsVersionForPath(state, KEY);
+			publish({ uri: pathToFileURL(FILE).href, version: 0, diagnostics: [D] });
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(state.pushDiagnostics.get(KEY)).toEqual([D]);
+			// Delivered: the version a waiting touch reads has moved.
+			expect(diagnosticsVersionForPath(state, KEY)).toBeGreaterThan(before);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// Verify round F1: an unstamped close used to inherit the stamp of the touch

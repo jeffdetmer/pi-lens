@@ -164,7 +164,7 @@ async function setup() {
 				documentDrift: { peek(p: string): { fingerprint: string } | undefined };
 			}
 		).documentDrift.peek(FILE)?.fingerprint;
-	return { state, wire, gates, touch, pendingQueued, recordFp };
+	return { state, wire, gates, touch, pendingQueued, recordFp, service };
 }
 
 describe("#3481 — the notify queue sends the latest read, not the latest enqueued", () => {
@@ -427,6 +427,18 @@ describe("#3543 — a touch on a dead client records nothing", () => {
 		state.isConnected = true;
 		await touch(C);
 		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`, `didChange:${C}`]);
+	});
+
+	// #3564: `openFile` is the second writer of the drift record (#1783), and it
+	// stamped content its `notify.open` never sent. The drift sweep then read the
+	// server as holding it and never re-pushed.
+	it("openFile writes no drift record for content a dead client never received", async () => {
+		const { state, wire, recordFp, service } = await setup();
+		state.isConnected = false;
+		await service.openFile(FILE, B);
+
+		expect(wire).toEqual([`didOpen:${A}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(A));
 	});
 });
 

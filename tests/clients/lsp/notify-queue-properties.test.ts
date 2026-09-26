@@ -476,38 +476,14 @@ function queuedCloseSent(run: Run): string[] {
 }
 
 /**
- * Finding F3, #3545: a stale saved read kept out behind a pending `change`
- * entry rides on the change's run, which drops saves (#3405), so no didSave
- * goes out. The change must still be unsettled when the save is issued; one
- * that already settled has no run left to ride on. `handleNotifyChange` has no production caller today
- * (`LSPService.updateFile` is uncalled). Carved out of `saveSurvives` only;
- * the replay below fails until #3545 is fixed, and this predicate goes with
- * the fix.
- */
-function staleSaveBehindChange(run: Run, save: Touch): boolean {
-	return run.touches.some(
-		(c) =>
-			c.kind === "change" &&
-			c.issuedAt < save.issuedAt &&
-			(c.settledAt ?? Number.POSITIVE_INFINITY) > save.issuedAt &&
-			run.touches.some(
-				(p) =>
-					p.issuedAt < c.issuedAt &&
-					p.stamp !== undefined &&
-					save.stamp !== undefined &&
-					p.stamp > save.stamp,
-			),
-	);
-}
-
-/**
  * #3405 / #3481 round-1 B1: a save produces a didSave after it was issued,
  * even when its content was superseded, for the document the server holds;
  * and no didSave goes out for a document the server does not hold. The save
  * is owed only while nothing legitimately ends it: a live client, no close
- * after it or pending when it was issued, no later `change` (a change drops
- * an inherited save by design, #3405), a document on the server at the end,
- * and a file there from the save on. The last two are separate cases:
+ * after it or pending when it was issued, a document on the server at the
+ * end, and a file there from the save on. A `change` does not end it: a save
+ * that rides on a change's run goes out for the document the change left the
+ * server holding (#3545). The last two are separate cases:
  * - A saved read older than one the queue already ran is dropped. When that
  *   newer read was itself refused (its file was gone), the server holds
  *   nothing and no didSave is possible.
@@ -530,17 +506,12 @@ function saveSurvives(run: Run): string[] {
 			(c) => (c.settledAt ?? Number.POSITIVE_INFINITY) > save.issuedAt,
 		);
 		if (endedByClose) continue;
-		if (
-			run.touches.some((t) => t.kind === "change" && t.issuedAt > save.issuedAt)
-		)
-			continue;
 		if (!serverDoc(run.wire).open) continue;
 		if (
 			!existsAt(run, save.issuedAt) ||
 			run.gone.some((g) => g > save.issuedAt)
 		)
 			continue;
-		if (staleSaveBehindChange(run, save)) continue;
 		const saved = run.wire.some(
 			(m) => m.method === "didSave" && m.delivered && m.at > save.issuedAt,
 		);
@@ -629,10 +600,10 @@ describe("#3530 — notify queue properties over scheduled interleavings", () =>
 	/**
 	 * Findings of this property, each replayed over every ordering of its
 	 * shrunk counterexample's commands. F1 (#3543) and F2 (#3544) are fixed and
-	 * replay as regressions. `it.fails` marks a finding still open on master:
-	 * green while it stands, red once fixed. An open finding is carved out of
-	 * the property above by a named predicate (`staleSaveBehindChange` #3545)
-	 * that goes with its fix.
+	 * replay as regressions, and so does F3 (#3545), whose carve-out went with
+	 * its fix. A finding still open on master is marked `it.fails` (green while
+	 * it stands, red once fixed) and carved out of the property above by a named
+	 * predicate that goes with its fix.
 	 */
 	describe("findings, replayed over every ordering", () => {
 		const replay = (
@@ -675,7 +646,7 @@ describe("#3530 — notify queue properties over scheduled interleavings", () =>
 					: [`server holds ${doc.open ? doc.content : "nothing"}, not c1`];
 			}));
 
-		it.fails("F3 (#3545): a stale saved read kept out behind a pending change sends no didSave", () =>
+		it("F3 (#3545): a stale saved read kept out behind a pending change still sends didSave", () =>
 			replay([open(0), open(3), { t: "change" }, open(2, true)], true, (run) =>
 				run.wire.some((m) => m.method === "didSave")
 					? []
