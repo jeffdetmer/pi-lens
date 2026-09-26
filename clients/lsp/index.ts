@@ -7211,6 +7211,11 @@ export class LSPService {
 			if (lateDeliveryPending.length > 0) {
 				result.deferredServerIds = lateDeliveryPending;
 			}
+			// #3528 r2: a caller that must not claim a sync it did not make
+			// (`resyncLspFile`) reads which servers never got this content.
+			if (supersededServerIds.length > 0) {
+				result.supersededServerIds = supersededServerIds;
+			}
 
 			logLatency({
 				type: "phase",

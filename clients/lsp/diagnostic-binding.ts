@@ -178,6 +178,13 @@ export interface TouchFileResult {
 	 * of the coverage notice, which is what says the result is incomplete.
 	 */
 	deferredServerIds?: string[];
+	/**
+	 * #3528 r2: servers whose notify queue did not send this touch's content (a
+	 * later read was sent instead, the path was closing or renamed away, or the
+	 * client was dead): the same set as the `lsp_touch_file` row's
+	 * `supersededServerIds`. Absent when every server got it.
+	 */
+	supersededServerIds?: string[];
 	binding?: DiagnosticBinding;
 }
 

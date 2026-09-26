@@ -355,6 +355,18 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"queue, not the work it admits — #2523 says so explicitly.",
 		owner: "#2523 slice 2",
 	},
+	"clients/runtime-agent-end.ts#0b7eb0bf~12dfd718": {
+		family: "hook-await",
+		site: "off-hook",
+		reason:
+			"#3529's post-exit resync awaits the abandoned format phase's " +
+			"`abandoned` promise inside a `void`-launched task that starts " +
+			"only after `agent_settled`'s own `bounded()` gave up on the " +
+			"phase; the hook never awaits it. It settles when the abandoned " +
+			"formatter run does: its spawn has a 15 s timeout, the command " +
+			"resolution before the spawn has none (#3558).",
+		owner: "#3558",
+	},
 	"clients/runtime-agent-end.ts#1f35703b~52cc4490": {
 		family: "hook-await",
 		site: "agent_settled",
@@ -363,6 +375,36 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"agent_settled list (runtime-agent-end.ts:871): count-capped at " +
 			"5 fixes, with no time bound at all.",
 		owner: "#2523 slice 2",
+	},
+	"clients/runtime-agent-end.ts#2026645d~2c16e2ec": {
+		family: "hook-await",
+		site: "off-hook",
+		reason:
+			"#3529's post-exit `resyncLspFile` of a fresh stamped read, run only " +
+			"while the drain's session is current (#3528 r1 F1), inside " +
+			"a `void`-launched task the hook never awaits (it starts after " +
+			"`agent_settled`'s `bounded()` gave up on the phase). The resync " +
+			"races its own touch against the LSP sync budget.",
+		owner: "#3529",
+	},
+	"clients/runtime-agent-end.ts#5a28a4f6~63a9c957": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`resyncLspFile` after a deferred write: the LSP touch has its " +
+			"own wait bound, the resync above it does not. #3528 r1 F1 runs it " +
+			"through the drain's session guard (same await).",
+		owner: "#2523 slice 2",
+	},
+	"clients/runtime-agent-end.ts#5f7b6a40~380334ff": {
+		family: "hook-await",
+		site: "off-hook",
+		reason:
+			"#3529's post-exit resync awaits the abandoned format phase " +
+			"itself inside a `void`-launched task that starts only after " +
+			"`agent_settled`'s own `bounded()` gave up on that phase; the " +
+			"hook never awaits it.",
+		owner: "#3529",
 	},
 	"clients/runtime-agent-end.ts#846909f2~82252dcb": {
 		family: "hook-await",
@@ -376,20 +418,13 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"after 45011ms`.",
 		owner: "#2523 slice 2",
 	},
-	"clients/runtime-agent-end.ts#b2e21790~677753f9": {
+	"clients/runtime-agent-end.ts#bdcae053~0cff74c4": {
 		family: "hook-await",
 		site: "agent_settled",
 		reason:
 			"`resyncLspFile` after a deferred write: the LSP touch has its " +
-			"own wait bound, the resync above it does not.",
-		owner: "#2523 slice 2",
-	},
-	"clients/runtime-agent-end.ts#e36d39b8~05b260ce": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`resyncLspFile` after a deferred write: the LSP touch has its " +
-			"own wait bound, the resync above it does not.",
+			"own wait bound, the resync above it does not. #3528 r1 F1 runs it " +
+			"through the drain's session guard (same await).",
 		owner: "#2523 slice 2",
 	},
 	"clients/runtime-agent-end.ts#f0b9e5ad~c7623832": {

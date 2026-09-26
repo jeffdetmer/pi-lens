@@ -1132,6 +1132,27 @@ export async function runAutofix(
 	};
 }
 
+/**
+ * #3528 r1 F1: what `resyncLspFile` did; every early return names its own
+ * reason. `synced`: `touchFile` reached a client and every server's notify
+ * queue took this content (a write still in flight past its own timeout is
+ * named in that touch's `lsp_touch_file` row). `not-sent` (#3528 r2): it
+ * reached no client (none could start). `superseded` (#3528 r2): a server's
+ * queue did not send it, because a newer read was already sent, the path was
+ * closing, or the client was dead.
+ */
+export type LspResyncOutcome =
+	| "synced"
+	| "not-sent"
+	| "superseded"
+	| "failed"
+	| "abandoned"
+	| "no-lsp"
+	| "up-to-date"
+	| "too-large"
+	| "unsupported"
+	| "aborted";
+
 export async function resyncLspFile(
 	filePath: string,
 	fileContent: string,
@@ -1141,9 +1162,9 @@ export async function resyncLspFile(
 	dbg: PipelineContext["dbg"],
 	/** #3481: `performance.now()` taken before `fileContent` was read. */
 	readStamp?: number,
-): Promise<void> {
-	if (getFlag("no-lsp")) return;
-	if (!needsContentRefresh && lspSyncCompleted) return;
+): Promise<LspResyncOutcome> {
+	if (getFlag("no-lsp")) return "no-lsp";
+	if (!needsContentRefresh && lspSyncCompleted) return "up-to-date";
 
 	// #3405 r2: the bound is `clients/lsp/content-limits.ts` now, shared with the
 	// dispatch runner and the didSave payload. THIS call stays: a file past the
@@ -1152,7 +1173,7 @@ export async function resyncLspFile(
 	// a post-write sync owes — removing it would start writing whole-file
 	// didOpen frames for files this pipeline has always refused.
 	const limitCheck = exceedsLspSyncLimits(fileContent);
-	if (limitCheck.tooLarge) return;
+	if (limitCheck.tooLarge) return "too-large";
 
 	try {
 		const lspService = (await loadLspService()).getLSPService();
@@ -1176,7 +1197,7 @@ export async function resyncLspFile(
 			// the edit proceeds. A wedged server no longer parks the pipeline.
 			const budgetMs = lspSyncBudgetMs();
 			const abort = getAmbientAbortSignal();
-			if (abort?.aborted) return;
+			if (abort?.aborted) return "aborted";
 
 			const startedAt = Date.now();
 			const touch = lspService
@@ -1192,10 +1213,13 @@ export async function resyncLspFile(
 					saved: true,
 					readStamp,
 				})
-				.then(() => "done" as const)
+				.then((result): LspResyncOutcome => {
+					if (result === undefined) return "not-sent";
+					return result.supersededServerIds?.length ? "superseded" : "synced";
+				})
 				.catch((err) => {
 					dbg(`LSP resync after autofix error: ${err}`);
-					return "done" as const;
+					return "failed" as const;
 				});
 
 			// #2540: Kick off auxiliary server acquisition concurrently and unawaited
@@ -1289,10 +1313,14 @@ export async function resyncLspFile(
 						? `timed out after ${budgetMs}ms; reason: spawn-in-flight (server still cold-spawning)`
 						: `timed out after ${budgetMs}ms; server slow/wedged`;
 				dbg(`LSP resync ${cause} for ${filePath}`);
+				return "abandoned";
 			}
+			return outcome;
 		}
+		return "unsupported";
 	} catch (err) {
 		dbg(`LSP resync after autofix error: ${err}`);
+		return "failed";
 	}
 }
 
@@ -1346,6 +1374,11 @@ export interface FormatPhaseResult {
 	fileContent: string | undefined;
 	/** #3481: `performance.now()` taken before `fileContent` was read. */
 	fileReadStamp: number;
+	/**
+	 * #3529: settles once every formatter the service's bound gave up on has
+	 * settled, so a caller can sync what that child wrote after `fileContent`.
+	 */
+	abandoned?: Promise<void>;
 	/** #3503: `Date.now()` taken before `fileContent` was read. */
 	fileReadAtMs: number;
 }
@@ -1364,6 +1397,7 @@ export async function runFormatPhase(
 	const formatFailures: string[] = [];
 	const formatUnavailable: Array<{ formatter: string; reason: string }> = [];
 	let fileContent: string | undefined;
+	let abandoned: Promise<void> | undefined;
 
 	const formatService = getFormatService();
 	try {
@@ -1378,6 +1412,7 @@ export async function runFormatPhase(
 		// #3506: a formatter the budget gave up on still runs, and its child
 		// writes later; the hold is released only once it has settled.
 		if (writeHold && result.abandoned) writeHold.outlive(result.abandoned);
+		abandoned = result.abandoned;
 		// An unavailable tool is NOT a formatter that ran (#2413): keep it out of
 		// `formattersUsed` (which drives change bookkeeping / turn summaries) and
 		// out of `formatFailures` (which requeues). Record it once, distinctly.
@@ -1452,6 +1487,7 @@ export async function runFormatPhase(
 		formatUnavailable,
 		fileContent,
 		fileReadStamp,
+		...(abandoned === undefined ? {} : { abandoned }),
 		fileReadAtMs,
 	};
 }

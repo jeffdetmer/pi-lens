@@ -367,7 +367,102 @@ describe("resyncLspFile — bounded pre-dispatch LSP sync", () => {
 		);
 
 		// resyncLspFile resolves immediately without waiting on auxiliary warmup
-		await expect(resyncPromise).resolves.toBeUndefined();
+		await expect(resyncPromise).resolves.toBe("synced");
 		expect(getAuxSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+// #3528 r1 F1: the deferred drain's post-exit row reported `synced` for a
+// resync that returned before touching anything. Each return path names what
+// it did, so a caller can record `synced` only when a touch went out.
+describe("resyncLspFile — its outcome names what it did (#3528 r1 F1)", () => {
+	const resync = (
+		content = "content",
+		flag: (name: string) => boolean | undefined = () => undefined,
+		needsContentRefresh = true,
+		lspSyncCompleted = false,
+	) =>
+		resyncLspFile(
+			"/proj/a.ts",
+			content,
+			needsContentRefresh,
+			lspSyncCompleted,
+			flag,
+			dbg,
+		);
+
+	it("synced: the touch completed", async () => {
+		mockService(async () => ({ diags: [] }));
+		await expect(resync()).resolves.toBe("synced");
+	});
+
+	it("no-lsp: the flag turned the LSP off", async () => {
+		mockService(async () => ({ diags: [] }));
+		await expect(resync("content", (name) => name === "no-lsp")).resolves.toBe(
+			"no-lsp",
+		);
+	});
+
+	it("up-to-date: no refresh needed and the sync already ran", async () => {
+		mockService(async () => ({ diags: [] }));
+		await expect(resync("content", () => undefined, false, true)).resolves.toBe(
+			"up-to-date",
+		);
+	});
+
+	it("too-large: past the shared content bound", async () => {
+		mockService(async () => ({ diags: [] }));
+		await expect(resync(`${"x".repeat(3 * 1024 * 1024)}\n`)).resolves.toBe(
+			"too-large",
+		);
+	});
+
+	it("unsupported: no server serves the file", async () => {
+		vi.mocked(getLSPService).mockReturnValue(
+			makeLspServiceDouble({ supportsLSP: () => false }) as any,
+		);
+		await expect(resync()).resolves.toBe("unsupported");
+	});
+
+	it("aborted: the turn was already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		setAmbientAbortSignal(controller.signal);
+		mockService(async () => ({ diags: [] }));
+		await expect(resync()).resolves.toBe("aborted");
+	});
+
+	it("abandoned: the bound gave up on a wedged touch", async () => {
+		const gate = gatedPromise<unknown>();
+		mockService(() => gate.promise);
+		await expect(resync()).resolves.toBe("abandoned");
+		gate.resolve(null);
+	});
+
+	it("failed: the service lookup threw", async () => {
+		vi.mocked(getLSPService).mockImplementation(() => {
+			throw new Error("service unavailable");
+		});
+		await expect(resync()).resolves.toBe("failed");
+	});
+
+	it("not-sent: the touch reached no client", async () => {
+		mockService(async () => undefined);
+		await expect(resync()).resolves.toBe("not-sent");
+	});
+
+	it("superseded: the notify queue dropped this read as older than one it sent", async () => {
+		mockService(async () => ({
+			diags: [],
+			supersededServerIds: ["typescript"],
+		}));
+		await expect(resync()).resolves.toBe("superseded");
+	});
+
+	it("failed: the touch rejected", async () => {
+		mockService(async () => {
+			throw new Error("server gone");
+		});
+		await expect(resync()).resolves.toBe("failed");
 	});
 });
