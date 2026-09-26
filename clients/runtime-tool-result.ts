@@ -32,7 +32,7 @@ import {
 	isPathIgnoredByProject,
 } from "./file-utils.js";
 import { invalidateFormatterCacheForPath } from "./formatters.js";
-import type { ReadGuard } from "./read-guard.js";
+import { deliveredLineEvidence, type ReadGuard } from "./read-guard.js";
 import { getFormatService } from "./format-service.js";
 import {
 	isExternalOrVendorFile,
@@ -84,7 +84,11 @@ import {
 	type ProjectChangeSource,
 } from "./project-changes.js";
 import type { RuffClient } from "./ruff-client.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type {
+	ReadWidening,
+	RuntimeCoordinator,
+} from "./runtime-coordinator.js";
+import { EXPANSION_LIMIT_LINES } from "./read-expansion.js";
 import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
@@ -1108,6 +1112,75 @@ async function dispatchPipelineAnalysis(args: {
 	return { crashed: false, result };
 }
 
+/**
+ * #3523: the one `edits[].range` replacement of a positional edit call, as
+ * executed. Its `newText` then occupies the lines from `range.start.line`.
+ */
+function singlePositionalEdit(
+	input: unknown,
+): { start: number; newText: string } | undefined {
+	const edits = (input as { edits?: unknown } | undefined)?.edits;
+	if (!Array.isArray(edits) || edits.length !== 1) return undefined;
+	const edit = edits[0] as {
+		range?: { start?: { line?: unknown } };
+		newText?: unknown;
+	};
+	const start = edit?.range?.start?.line;
+	return typeof start === "number" && typeof edit.newText === "string"
+		? { start, newText: edit.newText }
+		: undefined;
+}
+
+/**
+ * pi's `read` output less the continuation notice pi appends after the
+ * delivered lines (`@earendil-works/pi-coding-agent` `dist/core/tools/read.js`:
+ * `[Showing lines A-B of T. …]`, `[Showing lines A-B of T (50.0KB limit). …]`,
+ * `[N more lines in file. …]`, each after a blank line).
+ */
+const PI_READ_NOTICE =
+	/\n\n\[(?:Showing lines \d+-\d+ of \d+(?: \([^)\]]+ limit\))?|\d+ more lines in file)\. Use offset=\d+ to continue\.\]$/;
+
+function piReadBody(text: string): string {
+	return text.replace(PI_READ_NOTICE, "");
+}
+
+/**
+ * #3519/#3523: the pushed record that the read guard took a read from text
+ * the conversation showed the agent (`read_recorded` is verbose-only).
+ */
+function logConversationRead(
+	source: "autofix-attachment" | "own-edit",
+	filePath: string,
+	offset: number,
+	evidence: {
+		lineCount: number;
+		lineHashes: Record<number, string> | undefined;
+	},
+): void {
+	logLatency({
+		type: "phase",
+		phase: "read_guard_conversation_read",
+		filePath,
+		durationMs: 0,
+		metadata: {
+			source,
+			offset,
+			lineCount: evidence.lineCount,
+			hashed: evidence.lineHashes !== undefined,
+		},
+	});
+}
+
+/** #3555: the leading note on a read the tool_call widened. */
+function readWideningNote(widening: ReadWidening): string {
+	const { requested, shown, boundary } = widening;
+	const reason =
+		"heading" in boundary
+			? `the Markdown section under the heading "${boundary.heading}" (heading boundary)`
+			: `the enclosing ${boundary.symbol.kind} "${boundary.symbol.name}" (symbol boundary)`;
+	return `[pi-lens: read widened to ${reason}: you asked for lines ${requested.offset}-${requested.offset + requested.limit - 1}, this shows lines ${shown.offset}-${shown.offset + shown.limit - 1}. Re-request with limit > ${EXPANSION_LIMIT_LINES} for the exact range.]`;
+}
+
 export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	content: Array<{ type: string; text?: string }>;
 	isError?: boolean;
@@ -1152,6 +1225,49 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		toolCallId !== undefined
 			? runtime.takeToolCallAttribution(toolCallId)
 			: undefined;
+	// #3555: claimed here, before any return, so it never outlives its call.
+	// A read reaches only the two returns that prepend it (the unattributed
+	// relative path below, and the not-a-mutation exit). The note is its own
+	// leading block, never spliced into the file text.
+	const readWidening =
+		event.toolName === "read" && toolCallId !== undefined
+			? runtime.takeReadWidening(toolCallId)
+			: undefined;
+	// Only for the range that executed: a later handler may have re-targeted
+	// the read, or the id may belong to a different call.
+	// A read tool_call that returned early never dropped a stale entry for its
+	// id, so the file has to match too.
+	const executedRead = event.input as {
+		filePath?: unknown;
+		offset?: unknown;
+		limit?: unknown;
+	};
+	const notedWidening =
+		readWidening &&
+		event.isError !== true &&
+		(rawFilePath ?? executedRead.filePath) === readWidening.inputPath &&
+		executedRead.offset === readWidening.shown.offset &&
+		executedRead.limit === readWidening.shown.limit
+			? readWidening
+			: undefined;
+	const readNote = notedWidening
+		? [{ type: "text", text: readWideningNote(notedWidening) }]
+		: [];
+	if (notedWidening) {
+		// #3555: the pushed record that a widening was disclosed.
+		logLatency({
+			type: "phase",
+			phase: "read_widening_note",
+			toolName: event.toolName,
+			filePath: notedWidening.filePath,
+			durationMs: 0,
+			metadata: {
+				requested: notedWidening.requested,
+				shown: notedWidening.shown,
+				boundary: "heading" in notedWidening.boundary ? "heading" : "symbol",
+			},
+		});
+	}
 
 	let resolutionBasis: string;
 	if (attribution) {
@@ -1185,7 +1301,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			durationMs: 0,
 			metadata: { toolCallId, rawFilePath, guessedPath },
 		});
-		return;
+		return readNote.length > 0
+			? { content: [...readNote, ...event.content] }
+			: undefined;
 	} else {
 		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
 		// unambiguous regardless of any basis, see the bash-write dispatch
@@ -1676,23 +1794,113 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						expandedByTs: false,
 					},
 				});
-				const deliveredRecord = {
-					filePath: deliveredFilePath,
-					requestedOffset,
-					requestedLimit: requestedLimit ?? deliveredLimit,
-					effectiveOffset: requestedOffset,
-					effectiveLimit: deliveredLimit,
-					expandedByLsp: false,
-					turnIndex: runtime.turnIndex,
-					writeIndex: runtime.peekWriteIndex(),
-					timestamp: Date.now(),
+				// #3524: another writer moved the file after the tool_call's stamp,
+				// so the disk may not be what pi delivered, and by now it holds the
+				// racer's bytes. The stamp stays where it was. The evidence is the
+				// delivered text (less pi's continuation notice) when pi's own count
+				// vouches for it: no more lines than pi's truncation count, or, for
+				// an untruncated limited read, exactly as many lines as the
+				// tool_call's capture hashed. Other text is not pi's raw output (a
+				// producer upstream decorated it), and a read with no count (no
+				// limit, no truncation) has nothing to vouch for it. The evidence
+				// is then the tool_call's own capture: the provisional record this
+				// result supersedes, the newest one, since an id can be reused,
+				// its range clipped to the lines pi showed. Where the capture
+				// equals the text, the two are the same evidence; where a write
+				// landed before pi's read, the capture refuses lines the agent was
+				// shown until it re-reads. With no hashed capture there is no
+				// evidence, and nothing is recorded.
+				const raced = deps.readGuard.diskMovedSinceStamp(deliveredFilePath);
+				const deliveredText = raced
+					? deliveredLineEvidence(
+							piReadBody(
+								event.content
+									.map((part) =>
+										part.type === "text" ? (part.text ?? "") : "",
+									)
+									.join("\n"),
+							),
+							requestedOffset,
+						)
+					: undefined;
+				const capture = raced
+					? deps.readGuard
+							.getReadHistory(deliveredFilePath)
+							.slice()
+							.reverse()
+							.find(
+								(candidate) =>
+									candidate.source ===
+									`native-read:${nativeReadToolCallId}:provisional`,
+							)
+					: undefined;
+				const capturedLines = capture?.lineHashes
+					? Object.keys(capture.lineHashes).length
+					: 0;
+				const delivered =
+					deliveredText &&
+					(truncation?.outputLines !== undefined
+						? deliveredText.lineCount <= truncation.outputLines
+						: requestedLimit !== undefined &&
+							deliveredText.lineCount === capturedLines)
+						? deliveredText
+						: undefined;
+				// The capture's limit can exceed the lines it hashed (a limit past
+				// the end of the file); hashes past the clip would still be a
+				// relocation target for lines pi never showed.
+				const shownLimit = capture
+					? Math.min(
+							capture.effectiveLimit,
+							truncation?.outputLines ?? Number.POSITIVE_INFINITY,
+							capturedLines,
+						)
+					: 0;
+				const captureEvidence = capture?.lineHashes && {
+					effectiveOffset: capture.effectiveOffset,
+					effectiveLimit: shownLimit,
+					// Integer keys enumerate in ascending order, from the offset.
+					lineHashes: Object.fromEntries(
+						Object.entries(capture.lineHashes).slice(0, shownLimit),
+					),
 				};
-				if (nativeReadToolCallId) {
-					deps.readGuard.recordRead(deliveredRecord, {
-						supersedes: { toolCallId: nativeReadToolCallId },
+				if (raced) {
+					incrementDegradationCount({
+						kind: "native-read-raced-writer",
+						subject: deliveredFilePath,
+						reason: delivered
+							? "the file changed between pi's read and its tool_result; the read is recorded from the delivered text"
+							: captureEvidence
+								? "the file changed between pi's read and its tool_result; pi's line count does not vouch for the delivered text, so the tool_call's capture is the evidence"
+								: "the file changed between pi's read and its tool_result; pi's line count does not vouch for the delivered text and there is no hashed tool_call capture, so the read is not recorded",
 					});
-				} else {
-					deps.readGuard.recordRead(deliveredRecord);
+				}
+				const evidence =
+					raced && !delivered
+						? captureEvidence
+						: {
+								effectiveOffset: requestedOffset,
+								effectiveLimit: delivered?.lineCount ?? deliveredLimit,
+								lineHashes: delivered?.lineHashes,
+							};
+				if (evidence) {
+					const deliveredRecord = {
+						filePath: deliveredFilePath,
+						requestedOffset,
+						requestedLimit: requestedLimit ?? deliveredLimit,
+						effectiveOffset: evidence.effectiveOffset,
+						effectiveLimit: evidence.effectiveLimit,
+						expandedByLsp: false,
+						...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
+						turnIndex: runtime.turnIndex,
+						writeIndex: runtime.peekWriteIndex(),
+						timestamp: Date.now(),
+					};
+					deps.readGuard.recordRead(deliveredRecord, {
+						...(nativeReadToolCallId && {
+							supersedes: { toolCallId: nativeReadToolCallId },
+						}),
+						stampFileTime: !raced,
+					});
 				}
 			}
 		}
@@ -2014,8 +2222,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		dbg(
 			`tool_result: skipped turn tracking - toolName="${event.toolName}" is not a classified mutation`,
 		);
-		return syntheticWriteContent.length > 0
-			? { content: [...event.content, ...syntheticWriteContent] }
+		return syntheticWriteContent.length > 0 || readNote.length > 0
+			? { content: [...readNote, ...event.content, ...syntheticWriteContent] }
 			: undefined;
 	}
 	if (!filePath) {
@@ -2096,6 +2304,35 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		filePath,
 		stateHash: postWriteStateHash,
 	});
+
+	// #3523: an edit the guard allowed at the agent's own line numbers is the
+	// agent's view of the lines it wrote, so its next edit of them is judged
+	// against its `newText`, not the read that predates it. One positional
+	// edit only: in a batch, each range's lines shift by the others' growth.
+	// Per event, so before the debounce keeps only the latest. The mark is
+	// only ever set by the guard's own check, so `--no-read-guard` never
+	// reaches here. recordWritten re-stamps FileTime after this, so the
+	// record's own stamp is always superseded.
+	const ownEdit = attribution?.editInPlace
+		? singlePositionalEdit(event.input)
+		: undefined;
+	if (ownEdit) {
+		const evidence = deliveredLineEvidence(ownEdit.newText, ownEdit.start);
+		deps.readGuard?.recordRead({
+			filePath,
+			requestedOffset: ownEdit.start,
+			requestedLimit: evidence.lineCount,
+			effectiveOffset: ownEdit.start,
+			effectiveLimit: evidence.lineCount,
+			expandedByLsp: false,
+			...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
+			turnIndex: runtime.turnIndex,
+			writeIndex: runtime.peekWriteIndex(),
+			timestamp: Date.now(),
+			source: "own-edit",
+		});
+		logConversationRead("own-edit", filePath, ownEdit.start, evidence);
+	}
 
 	// Must happen before debounce admission: latestDeps intentionally retains only
 	// the latest event, but write -> edit is a sticky turn transition.
@@ -2694,6 +2931,35 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			postMutation.filePath,
 			attachAuthoritativeContent,
 		);
+		// #3519: the attached bytes are "authoritative for subsequent edits",
+		// so they are the agent's whole-file view: hashed from the attachment,
+		// not from a disk another writer may have moved since the pipeline read
+		// it. Only when delivered: without it the agent's view is its own write.
+		if (attachAuthoritativeContent && !getFlag("no-read-guard")) {
+			const evidence = deliveredLineEvidence(postMutation.content, 1);
+			deps.readGuard?.recordRead(
+				{
+					filePath: postMutation.filePath,
+					requestedOffset: 1,
+					requestedLimit: evidence.lineCount,
+					effectiveOffset: 1,
+					effectiveLimit: evidence.lineCount,
+					expandedByLsp: false,
+					...(evidence.lineHashes && { lineHashes: evidence.lineHashes }),
+					turnIndex: runtime.turnIndex,
+					writeIndex: runtime.peekWriteIndex(),
+					timestamp: Date.now(),
+					source: "autofix-attachment",
+				},
+				{ stampFileTime: false },
+			);
+			logConversationRead(
+				"autofix-attachment",
+				postMutation.filePath,
+				1,
+				evidence,
+			);
+		}
 	}
 	const returnedContent = attachAuthoritativeContent
 		? [...event.content, { type: "text", text: attachmentText }]

@@ -699,6 +699,14 @@ export type DegradationKind =
 	| "mode-suppression"
 	| "native-read-clipped"
 	/**
+	 * #3524: the file moved between a native read's tool_call and its
+	 * tool_result, so the read is recorded from the text pi delivered and
+	 * FileTime keeps the tool_call's stamp. Subject is the file, counted per
+	 * occurrence (`incrementDegradationCount`): a writer racing the agent's
+	 * reads repeatedly shows as a rising count.
+	 */
+	| "native-read-raced-writer"
+	/**
 	 * A shell-out runner's tool DID produce output, exited nonzero, and the
 	 * runner's parser extracted ZERO diagnostics from it (#1948). The adjacent
 	 * `runner-empty-result` covers "the tool produced nothing"; this covers

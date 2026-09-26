@@ -230,6 +230,8 @@ describe("bash grep searchReads registration", () => {
 					effectiveOffset: 1,
 					effectiveLimit: 120,
 				}),
+				// #3524: no writer raced this read, so it re-stamps FileTime.
+				{ stampFileTime: true },
 			);
 		} finally {
 			env.cleanup();

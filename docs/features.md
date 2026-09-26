@@ -118,7 +118,7 @@ pi-lens enforces a **read-before-edit** policy on all file writes and edits. Bef
 - **Out-of-range block** — blocks if the edit target lines fall outside the ranges previously read, ensuring the agent cannot modify code it hasn't seen
 - **Snapshot validation** — covered edit ranges are hash-checked against the lines the agent actually saw at read time; stale-range edits are rejected even when range coverage exists. Hash capture covers reads up to 3 000 lines
 
-Coverage is tracked across multiple reads: two reads of lines 1–100 and 101–200 together satisfy a full-file write. Symbol-expanded reads (small reads silently widened to the enclosing symbol via tree-sitter) count toward coverage at the symbol level. Markdown files generate a warning instead of blocking (edits outside the section-expanded read range are warned, not silently passed). Plain-text (`.txt`) and log (`.log`) files remain fully exempt.
+Coverage is tracked across multiple reads: two reads of lines 1–100 and 101–200 together satisfy a full-file write. Symbol-expanded reads (small reads widened to the enclosing symbol via tree-sitter, labelled with a leading note) count toward coverage at the symbol level. Markdown files generate a warning instead of blocking (edits outside the section-expanded read range are warned, not silently passed). Plain-text (`.txt`) and log (`.log`) files remain fully exempt.
 
 Override for a single edit: `/lens-allow-edit <path>`
 
@@ -294,7 +294,7 @@ Late-joiners are a non-problem in-process — extensions activate at `session_st
 
 ### Opportunistic Read Expansion
 
-When the agent reads a small slice of a file (≤ 60 lines), pi-lens transparently expands the read to the full enclosing symbol (function, method, or class) using the tree-sitter AST. The agent receives the full symbol as context, and the read guard records symbol-level coverage so edits anywhere within that symbol pass without requiring the agent to have read every line individually. Expansion runs within a 200 ms budget and falls back silently on unsupported file types or parse failures.
+When the agent reads a small slice of a file (≤ 100 lines), pi-lens expands the read to the full enclosing symbol (function, method, or class) using the tree-sitter AST, or to the enclosing heading section of a Markdown file. The result starts with a `[pi-lens: read widened ...]` note naming the requested and the returned lines; a `limit` above 100 reads the exact range. Expansion is off with the read guard (`--no-read-guard` or `readGuard.enabled=false`). The agent receives the full symbol as context, and the read guard records symbol-level coverage so edits anywhere within that symbol pass without requiring the agent to have read every line individually. Expansion runs within a 200 ms budget and falls back silently on unsupported file types or parse failures.
 
 Supported: TypeScript, TSX, JavaScript, JSX, Python, Go, Rust, Ruby, Java, Kotlin, Dart, Elixir, C, C++, C#, PHP, Swift, Lua, OCaml, Zig, Bash.
 

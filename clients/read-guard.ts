@@ -453,6 +453,18 @@ function readEffectiveRangeCoversRange(
 	);
 }
 
+/** Hash `lines` as file lines `firstLine`, `firstLine + 1`, ... */
+function hashLines(
+	lines: readonly string[],
+	firstLine: number,
+): Record<number, string> | undefined {
+	const hashes: Record<number, string> = {};
+	lines.forEach((line, i) => {
+		hashes[firstLine + i] = lineContentHash(line);
+	});
+	return lines.length > 0 ? hashes : undefined;
+}
+
 function captureLineHashes(
 	filePath: string,
 	offset: number,
@@ -461,15 +473,33 @@ function captureLineHashes(
 	if (limit <= 0 || limit > READ_HASH_MAX_LINES) return undefined;
 	try {
 		const lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-		const hashes: Record<number, string> = {};
+		const start = Math.max(1, offset);
 		const end = Math.min(lines.length, offset + limit - 1);
-		for (let lineNo = Math.max(1, offset); lineNo <= end; lineNo++) {
-			hashes[lineNo] = lineContentHash(lines[lineNo - 1] ?? "");
-		}
-		return Object.keys(hashes).length > 0 ? hashes : undefined;
+		return hashLines(lines.slice(start - 1, end), start);
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * A read's evidence taken from text the conversation showed the agent (an
+ * attached autofix, the agent's own `newText`, a delivered read), not from
+ * the disk at record time (#3519, #3523, #3524). `text` starts at file line
+ * `offset`. `lineHashes` is undefined past the same READ_HASH_MAX_LINES bound
+ * a disk capture has.
+ */
+export function deliveredLineEvidence(
+	text: string,
+	offset: number,
+): { lineCount: number; lineHashes: Record<number, string> | undefined } {
+	const lines = splitLines(text);
+	return {
+		lineCount: lines.length,
+		lineHashes:
+			lines.length <= READ_HASH_MAX_LINES
+				? hashLines(lines, offset)
+				: undefined,
+	};
 }
 
 export function currentLinesMatchReadSnapshot(
@@ -737,7 +767,15 @@ export class ReadGuard {
 	 */
 	recordRead(
 		record: ReadRecord,
-		opts?: { supersedes?: { toolCallId: string } },
+		opts?: {
+			supersedes?: { toolCallId: string };
+			/**
+			 * False when the record's evidence is text the conversation showed
+			 * the agent rather than the disk now, so the FileTime stamp is left
+			 * to whatever last observed the disk (#3519, #3523, #3524).
+			 */
+			stampFileTime?: boolean;
+		},
 	): void {
 		const filePath = this.key(record.filePath);
 		if (opts?.supersedes) {
@@ -877,7 +915,20 @@ export class ReadGuard {
 		}
 
 		// Also update FileTime stamp for this file
-		this.fileTime.read(storedRecord.filePath);
+		if (opts?.stampFileTime !== false)
+			this.fileTime.read(storedRecord.filePath);
+	}
+
+	/**
+	 * #3524: whether another write moved the file after its last FileTime
+	 * stamp (a native read's tool_call takes one). False when there is no
+	 * stamp at all: nothing says when the delivered bytes were read.
+	 */
+	diskMovedSinceStamp(filePath: string): boolean {
+		const key = this.key(filePath);
+		return (
+			this.fileTime.get(key) !== undefined && this.fileTime.hasChanged(key)
+		);
 	}
 
 	/**

@@ -140,6 +140,10 @@ let recentPhases: Array<{ phase: string; ts: string }> = [];
  * from opengrep's `semgrep/rulesRefreshed` notification handler, not work of
  * its own.
  *
+ * #3519/#3523/#3555: `read_guard_conversation_read` and `read_widening_note`
+ * are zero-duration records of a read the guard took from the conversation's
+ * text and of a widened read being labelled; the tool_result owns the work.
+ *
  * #2044: `test_runner_failed_target_state` is a zero-duration decision after a
  * bounded filesystem probe. The surrounding turn-end test-selection phase owns
  * any real work, so this row must not replace it in stall attribution.
@@ -171,6 +175,8 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"lsp_empty_first_publish_held",
 	"lsp_diagnostics_fence",
 	"lsp_rules_refreshed",
+	"read_guard_conversation_read",
+	"read_widening_note",
 ]);
 
 /**
