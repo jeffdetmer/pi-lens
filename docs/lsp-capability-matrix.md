@@ -121,12 +121,12 @@ carries the named admission until then.
 | json | vscode-json-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | css | vscode-css-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | html | vscode-html-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev |
+| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev+ci |
 | svelte | svelte-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci |
 | ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
 | csharp | csharp-ls | pull | — | n/a (pull) | 1 | ci |
-| typescript | typescript-language-server | push-only | silent | direct | 3 | dev+ci |
+| typescript | typescript-language-server | push-only | silent | empty-first | 3 | dev+ci |
 | markdown | marksman | push-only | silent | direct | 3 | ci |
 | lua | lua-language-server | push-only | silent | direct | 3 | dev+ci |
 | python | pyright | push-only | publishes-versioned | direct | 2 | dev+ci |
@@ -229,4 +229,4 @@ Telemetry only — never a CI gate. Compares each probed server's observed
 marker; a mismatch means the marker may need a human update (#529). `unknown`
 observations are never compared (a slow/absent server is not evidence either way).
 
-_None observed as of the last probe run._
+- **[silent-not-marked]** observed silent on clean transitions but wait-policy/strategies.ts has no silentOnClean marker for "typescript7" — cascade is burning the full in-lane wait it could skip (the pre-#458 situation)
