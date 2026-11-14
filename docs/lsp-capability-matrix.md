@@ -121,7 +121,7 @@ carries the named admission until then.
 | json | vscode-json-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | css | vscode-css-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | html | vscode-html-language-server | pull | — | n/a (pull) | 1 | dev+ci |
-| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev |
+| rust | rust-analyzer | pull | — | n/a (pull) | 1 | dev+ci |
 | svelte | svelte-language-server | pull | — | n/a (pull) | 1 | dev+ci |
 | deno | deno (alt of typescript) | pull | — | n/a (pull) | 1 | dev+ci |
 | ruby | ruby-lsp | pull | — | n/a (pull) | 1 | ci |
